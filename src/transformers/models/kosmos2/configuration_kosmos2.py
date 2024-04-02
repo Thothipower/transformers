@@ -14,6 +14,7 @@
 # limitations under the License.
 """ KOSMOS-2 model configuration"""
 
+import copy
 import os
 from typing import Union
 
@@ -23,8 +24,12 @@ from ...utils import logging
 
 logger = logging.get_logger(__name__)
 
-
-from ..deprecated._archive_maps import KOSMOS2_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
+KOSMOS2_PRETRAINED_CONFIG_ARCHIVE_MAP = {
+    "ydshieh/temp-testing-kosmos-2-rename-002": (
+        "https://huggingface.co/ydshieh/temp-testing-kosmos-2-rename-002/resolve/main/config.json"
+    ),
+    # See all KOSMOS-2 models at https://huggingface.co/models?filter=kosmos-2
+}
 
 
 class Kosmos2TextConfig(PretrainedConfig):
@@ -32,7 +37,8 @@ class Kosmos2TextConfig(PretrainedConfig):
     This is the configuration class to store the configuration of a [`Kosmos2TextModel`]. It is used to instantiate a
     KOSMOS-2 text decoder according to the specified arguments, defining the model architecture. Instantiating a
     configuration with the defaults will yield a similar configuration to that of the text decoder of the KOSMOS-2
-    [microsoft/kosmos-2-patch14-224](https://huggingface.co/microsoft/kosmos-2-patch14-224) architecture.
+    [ydshieh/temp-testing-kosmos-2-rename-002](https://huggingface.co/ydshieh/temp-testing-kosmos-2-rename-002)
+    architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
@@ -73,7 +79,6 @@ class Kosmos2TextConfig(PretrainedConfig):
         use_cache (`bool`, *optional*, defaults to `True`):
             Whether or not the model should return the last key/values attentions (not used by all models).
     ```"""
-
     model_type = "kosmos_2_text_model"
     keys_to_ignore_at_inference = ["past_key_values"]
     attribute_map = {
@@ -151,7 +156,8 @@ class Kosmos2VisionConfig(PretrainedConfig):
     This is the configuration class to store the configuration of a [`Kosmos2VisionModel`]. It is used to instantiate a
     KOSMOS-2 vision encoder according to the specified arguments, defining the model architecture. Instantiating a
     configuration with the defaults will yield a similar configuration to that of the vision encoder of the KOSMOS-2
-    [microsoft/kosmos-2-patch14-224](https://huggingface.co/microsoft/kosmos-2-patch14-224) architecture.
+    [ydshieh/temp-testing-kosmos-2-rename-002](https://huggingface.co/ydshieh/temp-testing-kosmos-2-rename-002)
+    architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
@@ -242,7 +248,8 @@ class Kosmos2Config(PretrainedConfig):
     This is the configuration class to store the configuration of a [`Kosmos2Model`]. It is used to instantiate a
     KOSMOS-2 model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the KOSMOS-2
-    [microsoft/kosmos-2-patch14-224](https://huggingface.co/microsoft/kosmos-2-patch14-224) architecture.
+    [ydshieh/temp-testing-kosmos-2-rename-002](https://huggingface.co/ydshieh/temp-testing-kosmos-2-rename-002)
+    architecture.
 
     Args:
         text_config (`dict`, *optional*):
@@ -268,7 +275,6 @@ class Kosmos2Config(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
-
     model_type = "kosmos-2"
     is_composition = True
 
@@ -293,3 +299,16 @@ class Kosmos2Config(PretrainedConfig):
         self.vision_config = Kosmos2VisionConfig(**vision_config)
 
         self.latent_query_num = latent_query_num
+
+    def to_dict(self):
+        """
+        Serializes this instance to a Python dictionary. Override the default [`~PretrainedConfig.to_dict`].
+
+        Returns:
+            `Dict[str, any]`: Dictionary of all the attributes that make up this configuration instance,
+        """
+        output = copy.deepcopy(self.__dict__)
+        output["text_config"] = self.text_config.to_dict()
+        output["vision_config"] = self.vision_config.to_dict()
+        output["model_type"] = self.__class__.model_type
+        return output

@@ -37,13 +37,13 @@ from ...test_modeling_common import (
     ids_tensor,
     random_attention_mask,
 )
-from ...test_pipeline_mixin import PipelineTesterMixin
 
 
 if is_torch_available():
     import torch
 
     from transformers import Kosmos2ForConditionalGeneration, Kosmos2Model
+    from transformers.models.kosmos2.modeling_kosmos2 import KOSMOS2_PRETRAINED_MODEL_ARCHIVE_LIST
 
 
 if is_vision_available():
@@ -196,7 +196,6 @@ class Kosmos2ModelTester:
         self.parent = parent
         self.text_model_tester = Kosmos2TextModelTester(parent, **text_kwargs)
         self.vision_model_tester = Kosmos2VisionModelTester(parent, **vision_kwargs)
-        self.batch_size = self.text_model_tester.batch_size  # need bs for batching_equivalence test
         self.latent_query_num = latent_query_num
         self.is_training = is_training
 
@@ -245,25 +244,14 @@ class Kosmos2ModelTester:
 
 
 @require_torch
-class Kosmos2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class Kosmos2ModelTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (Kosmos2Model, Kosmos2ForConditionalGeneration) if is_torch_available() else ()
     all_generative_model_classes = (Kosmos2ForConditionalGeneration,) if is_torch_available() else ()
-    pipeline_model_mapping = (
-        {"feature-extraction": Kosmos2Model, "image-to-text": Kosmos2ForConditionalGeneration}
-        if is_torch_available()
-        else {}
-    )
     fx_compatible = False
     test_head_masking = False
     test_pruning = False
     test_resize_embeddings = False
     test_attention_outputs = False
-
-    # TODO: `image-to-text` pipeline for this model needs Processor.
-    def is_pipeline_test_to_skip(
-        self, pipeline_test_casse_name, config_class, model_architecture, tokenizer_name, processor_name
-    ):
-        return pipeline_test_casse_name == "ImageToTextPipelineTests"
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         inputs_dict = copy.deepcopy(inputs_dict)
@@ -282,7 +270,7 @@ class Kosmos2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
         self.model_tester = Kosmos2ModelTester(self)
         self.config_tester = ConfigTester(self, config_class=Kosmos2Config, hidden_size=37)
 
-    # overwrite from common to skip `image_to_text_projection.latent_query`
+    # overwrite from test_modeling_common to skip `image_to_text_projection.latent_query`
     def test_initialization(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
 
@@ -316,26 +304,7 @@ class Kosmos2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
             expected_arg_names = ["pixel_values"]
             self.assertListEqual(arg_names[:1], expected_arg_names)
 
-    def test_load_save_without_tied_weights(self):
-        config, _ = self.model_tester.prepare_config_and_inputs_for_common()
-        config.text_config.tie_word_embeddings = False
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            with tempfile.TemporaryDirectory() as d:
-                model.save_pretrained(d)
-
-                model_reloaded, infos = model_class.from_pretrained(d, output_loading_info=True)
-                # Checking the state dicts are correct
-                reloaded_state = model_reloaded.state_dict()
-                for k, v in model.state_dict().items():
-                    self.assertIn(k, reloaded_state, f"Key {k} is missing from reloaded")
-                    torch.testing.assert_close(
-                        v, reloaded_state[k], msg=lambda x: f"{model_class.__name__}: Tensor {k}: {x}"
-                    )
-                # Checking there was no complain of missing weights
-                self.assertEqual(infos["missing_keys"], [])
-
-    # overwrite from common in order to use `self.model_tester.text_model_tester.num_hidden_layers`
+    # over... from common
     def test_hidden_states_output(self):
         def check_hidden_states_output(inputs_dict, config, model_class):
             model = model_class(config)
@@ -373,7 +342,6 @@ class Kosmos2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
 
             check_hidden_states_output(inputs_dict, config, model_class)
 
-    # overwrite from common in order to use `config.text_config.vocab_size` instead of `config.vocab_size`
     def test_tie_model_weights(self):
         if not self.test_torchscript:
             return
@@ -424,9 +392,9 @@ class Kosmos2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
 
     @slow
     def test_model_from_pretrained(self):
-        model_name = "microsoft/kosmos-2-patch14-224"
-        model = Kosmos2Model.from_pretrained(model_name)
-        self.assertIsNotNone(model)
+        for model_name in KOSMOS2_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
+            model = Kosmos2Model.from_pretrained(model_name)
+            self.assertIsNotNone(model)
 
     def _create_and_check_torchscript(self, config, inputs_dict):
         if not self.test_torchscript:
@@ -521,7 +489,9 @@ def prepare_img():
 @slow
 class Kosmos2ModelIntegrationTest(unittest.TestCase):
     def run_example(self, prompt, image, model, processor):
-        inputs = processor(text=prompt, images=image, return_tensors="pt", padding=True).to(torch_device)
+        inputs = processor(text=prompt, images=image, return_tensors="pt", add_eos_token=False, padding=True).to(
+            torch_device
+        )
 
         generation_outputs = model.generate(
             pixel_values=inputs["pixel_values"],
@@ -546,14 +516,14 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
         return scores, generated_ids, generated_text, processed_text, final_text_with_entities
 
     def test_snowman_image_captioning(self):
-        url = "https://huggingface.co/microsoft/kosmos-2-patch14-224/resolve/main/snowman.png"
+        url = "https://huggingface.co/ydshieh/temp-testing-kosmos-2-rename-002/resolve/main/snowman.png"
 
         image = Image.open(requests.get(url, stream=True).raw)
         image.save("new_image.jpg")
         image = Image.open("new_image.jpg")
 
-        model = AutoModelForVision2Seq.from_pretrained("microsoft/kosmos-2-patch14-224").to(torch_device)
-        processor = AutoProcessor.from_pretrained("microsoft/kosmos-2-patch14-224")
+        model = AutoModelForVision2Seq.from_pretrained("ydshieh/temp-testing-kosmos-2-rename-002").to(torch_device)
+        processor = AutoProcessor.from_pretrained("ydshieh/temp-testing-kosmos-2-rename-002")
 
         prompt = "<grounding>An image of"
         scores, generated_ids, generated_text, processed_text, final_text_with_entities = self.run_example(
@@ -562,7 +532,7 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
         processed_text = processed_text[0]
         final_text, entities = final_text_with_entities[0]
 
-        np.testing.assert_allclose(
+        assert np.allclose(
             torch.concat(scores[1:4])[:3, :3].to("cpu").numpy(),
             np.array(
                 [
@@ -573,7 +543,7 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
             ),
             atol=1e-5,
         )
-        np.testing.assert_allclose(
+        assert np.allclose(
             torch.concat(scores[-3:])[-3:, -3:].to("cpu").numpy(),
             np.array(
                 [
@@ -586,32 +556,25 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
         )
 
         # fmt: off
-        EXPECTED_IDS = [
-           [
+        assert generated_ids.to("cpu").numpy().tolist() == [
+            [
                 0, 64003, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
                 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
                 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 64004, 64012, 712, 1648, 9, 64007, 10, 43867, 64008,
                 64009, 64057, 64876, 64010, 5950, 597, 32, 64007, 10, 646, 64008, 64009, 64018, 64924, 64010, 4, 2
-           ]
+            ]
         ]
         # fmt: on
-        self.assertListEqual(generated_ids.to("cpu").numpy().tolist(), EXPECTED_IDS)
 
-        EXPECTED_PROCESSED_TEXT = (
+        assert processed_text == (
             "<grounding> An image of<phrase> a snowman</phrase><object><patch_index_0044><patch_index_0863></object> "
             "warming himself by<phrase> a fire</phrase><object><patch_index_0005><patch_index_0911></object>."
         )
-        self.assertEqual(processed_text, EXPECTED_PROCESSED_TEXT)
-
-        self.assertEqual(final_text, "An image of a snowman warming himself by a fire.")
-
-        EXPECTED_ENTITIES = [
+        assert final_text == "An image of a snowman warming himself by a fire."
+        assert entities == [
             ("a snowman", (12, 21), [(0.390625, 0.046875, 0.984375, 0.828125)]),
             ("a fire", (41, 47), [(0.171875, 0.015625, 0.484375, 0.890625)]),
         ]
-        self.assertListEqual(entities, EXPECTED_ENTITIES)
-
-        # test with the detail caption generation
 
         prompt = "<grounding>Describe this image in detail:"
         scores, generated_ids, generated_text, processed_text, final_text_with_entities = self.run_example(
@@ -620,7 +583,7 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
         processed_text = processed_text[0]
         final_text, entities = final_text_with_entities[0]
 
-        np.testing.assert_allclose(
+        assert np.allclose(
             torch.concat(scores[1:4])[:3, :3].to("cpu").numpy(),
             np.array(
                 [
@@ -631,7 +594,7 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
             ),
             atol=1e-5,
         )
-        np.testing.assert_allclose(
+        assert np.allclose(
             torch.concat(scores[-3:])[-3:, -3:].to("cpu").numpy(),
             np.array(
                 [
@@ -644,7 +607,7 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
         )
 
         # fmt: off
-        EXPECTED_IDS_LONG = [
+        assert generated_ids.to("cpu").numpy().tolist() == [
             [
                 0, 64003, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
                 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
@@ -658,9 +621,8 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
             ]
         ]
         # fmt: on
-        self.assertListEqual(generated_ids.to("cpu").numpy().tolist(), EXPECTED_IDS_LONG)
 
-        EXPECTED_PROCESSED_TEXT_LONG = (
+        assert processed_text == (
             "<grounding> Describe this image in detail: The image features a snowman sitting by<phrase> a campfire"
             "</phrase><object><patch_index_0005><patch_index_1007></object> in the snow. He is wearing<phrase> a hat"
             "</phrase><object><patch_index_0048><patch_index_0250></object>,<phrase> scarf</phrase><object>"
@@ -670,16 +632,13 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
             "nearby. The snowman appears to be enjoying the warmth of the fire, and it appears to have a warm and cozy "
             "atmosphere."
         )
-        self.assertEqual(processed_text, EXPECTED_PROCESSED_TEXT_LONG)
-
-        EXPECTED_FINAL_TEXT_LONG = (
+        assert final_text == (
             "Describe this image in detail: The image features a snowman sitting by a campfire in the snow. He is "
             "wearing a hat, scarf, and gloves, with a pot nearby and a cup placed nearby. The snowman appears to be "
             "enjoying the warmth of the fire, and it appears to have a warm and cozy atmosphere."
         )
-        self.assertEqual(final_text, EXPECTED_FINAL_TEXT_LONG)
 
-        EXPECTED_ENTITIES_LONG = [
+        assert entities == [
             ("a campfire", (71, 81), [(0.171875, 0.015625, 0.484375, 0.984375)]),
             ("a hat", (109, 114), [(0.515625, 0.046875, 0.828125, 0.234375)]),
             ("scarf", (116, 121), [(0.515625, 0.234375, 0.890625, 0.578125)]),
@@ -687,21 +646,20 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
             ("a pot", (140, 145), [(0.078125, 0.609375, 0.265625, 0.859375)]),
             ("a cup", (157, 162), [(0.890625, 0.765625, 0.984375, 0.984375)]),
         ]
-        self.assertListEqual(entities, EXPECTED_ENTITIES_LONG)
 
     def test_snowman_image_captioning_batch(self):
-        url = "https://huggingface.co/microsoft/kosmos-2-patch14-224/resolve/main/snowman.png"
+        url = "https://huggingface.co/ydshieh/temp-testing-kosmos-2-rename-002/resolve/main/snowman.png"
 
         image = Image.open(requests.get(url, stream=True).raw)
         image.save("new_image.jpg")
         image = Image.open("new_image.jpg")
 
-        model = AutoModelForVision2Seq.from_pretrained("microsoft/kosmos-2-patch14-224").to(torch_device)
+        model = AutoModelForVision2Seq.from_pretrained("ydshieh/temp-testing-kosmos-2-rename-002").to(torch_device)
 
-        prompt = ["<grounding>Describe this image in detail:", "<grounding>An image of"]
+        prompt = ["<grounding>An image of", "<grounding>Describe this image in detail:"]
 
         # left padding
-        processor = AutoProcessor.from_pretrained("microsoft/kosmos-2-patch14-224", padding_side="left")
+        processor = AutoProcessor.from_pretrained("ydshieh/temp-testing-kosmos-2-rename-002", padding_side="left")
 
         scores, generated_ids, generated_text, processed_text, final_text_with_entities = self.run_example(
             prompt, [image] * len(prompt), model, processor
@@ -711,6 +669,10 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
 
         # left padding gives identical results as non-padding
         EXPECTED_PROCESSED_TEXT_0 = (
+            "<grounding> An image of<phrase> a snowman</phrase><object><patch_index_0044><patch_index_0863></object> "
+            "warming himself by<phrase> a fire</phrase><object><patch_index_0005><patch_index_0911></object>."
+        )
+        EXPECTED_PROCESSED_TEXT_1 = (
             "<grounding> Describe this image in detail: The image features a snowman sitting by<phrase> a campfire"
             "</phrase><object><patch_index_0005><patch_index_1007></object> in the snow. He is wearing<phrase> a hat"
             "</phrase><object><patch_index_0048><patch_index_0250></object>,<phrase> scarf</phrase><object>"
@@ -720,21 +682,21 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
             "nearby. The snowman appears to be enjoying the warmth of the fire, and it appears to have a warm and cozy "
             "atmosphere."
         )
-        EXPECTED_PROCESSED_TEXT_1 = (
-            "<grounding> An image of<phrase> a snowman</phrase><object><patch_index_0044><patch_index_0863></object> "
-            "warming himself by<phrase> a fire</phrase><object><patch_index_0005><patch_index_0911></object>."
-        )
-        self.assertListEqual(processed_text, [EXPECTED_PROCESSED_TEXT_0, EXPECTED_PROCESSED_TEXT_1])
+        assert processed_text == [EXPECTED_PROCESSED_TEXT_0, EXPECTED_PROCESSED_TEXT_1]
 
-        EXPECTED_FINAL_TEXT_0 = (
+        EXPECTED_FINAL_TEXT_0 = "An image of a snowman warming himself by a fire."
+        EXPECTED_FINAL_TEXT_1 = (
             "Describe this image in detail: The image features a snowman sitting by a campfire in the snow. He is "
             "wearing a hat, scarf, and gloves, with a pot nearby and a cup placed nearby. The snowman appears to be "
             "enjoying the warmth of the fire, and it appears to have a warm and cozy atmosphere."
         )
-        EXPECTED_FINAL_TEXT_1 = "An image of a snowman warming himself by a fire."
-        self.assertListEqual(all_final_text, [EXPECTED_FINAL_TEXT_0, EXPECTED_FINAL_TEXT_1])
+        assert all_final_text == [EXPECTED_FINAL_TEXT_0, EXPECTED_FINAL_TEXT_1]
 
         EXPECTED_ENTITIES_0 = [
+            ("a snowman", (12, 21), [(0.390625, 0.046875, 0.984375, 0.828125)]),
+            ("a fire", (41, 47), [(0.171875, 0.015625, 0.484375, 0.890625)]),
+        ]
+        EXPECTED_ENTITIES_1 = [
             ("a campfire", (71, 81), [(0.171875, 0.015625, 0.484375, 0.984375)]),
             ("a hat", (109, 114), [(0.515625, 0.046875, 0.828125, 0.234375)]),
             ("scarf", (116, 121), [(0.515625, 0.234375, 0.890625, 0.578125)]),
@@ -742,14 +704,10 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
             ("a pot", (140, 145), [(0.078125, 0.609375, 0.265625, 0.859375)]),
             ("a cup", (157, 162), [(0.890625, 0.765625, 0.984375, 0.984375)]),
         ]
-        EXPECTED_ENTITIES_1 = [
-            ("a snowman", (12, 21), [(0.390625, 0.046875, 0.984375, 0.828125)]),
-            ("a fire", (41, 47), [(0.171875, 0.015625, 0.484375, 0.890625)]),
-        ]
-        self.assertListEqual(all_entities, [EXPECTED_ENTITIES_0, EXPECTED_ENTITIES_1])
+        assert all_entities == [EXPECTED_ENTITIES_0, EXPECTED_ENTITIES_1]
 
         # right padding
-        processor = AutoProcessor.from_pretrained("microsoft/kosmos-2-patch14-224")
+        processor = AutoProcessor.from_pretrained("ydshieh/temp-testing-kosmos-2-rename-002")
 
         scores, generated_ids, generated_text, processed_text, final_text_with_entities = self.run_example(
             prompt, [image] * len(prompt), model, processor
@@ -758,6 +716,6 @@ class Kosmos2ModelIntegrationTest(unittest.TestCase):
         all_entities = [x[1] for x in final_text_with_entities]
 
         # For right padding, only the non-padded sequences will give the same results as non-padding
-        self.assertEqual(processed_text[0], EXPECTED_PROCESSED_TEXT_0)
-        self.assertEqual(all_final_text[0], EXPECTED_FINAL_TEXT_0)
-        self.assertListEqual(all_entities[0], EXPECTED_ENTITIES_0)
+        assert processed_text[1] == EXPECTED_PROCESSED_TEXT_1
+        assert all_final_text[1] == EXPECTED_FINAL_TEXT_1
+        assert all_entities[1] == EXPECTED_ENTITIES_1

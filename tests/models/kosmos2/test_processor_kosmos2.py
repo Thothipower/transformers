@@ -37,7 +37,7 @@ if is_vision_available():
 
     from transformers import (
         AutoProcessor,
-        CLIPImageProcessor,
+        Kosmos2ImageProcessor,
         Kosmos2Processor,
         PreTrainedTokenizerFast,
         XLMRobertaTokenizer,
@@ -55,7 +55,7 @@ class Kosmos2ProcessorTest(unittest.TestCase):
     def setUp(self):
         self.tmpdirname = tempfile.mkdtemp()
 
-        image_processor = CLIPImageProcessor()
+        image_processor = Kosmos2ImageProcessor()
 
         # We have a SentencePiece fixture for testing
         slow_tokenizer = XLMRobertaTokenizer(SAMPLE_VOCAB)
@@ -99,7 +99,7 @@ class Kosmos2ProcessorTest(unittest.TestCase):
         self.assertIsInstance(processor.tokenizer, PreTrainedTokenizerFast)
 
         self.assertEqual(processor.image_processor.to_json_string(), image_processor_add_kwargs.to_json_string())
-        self.assertIsInstance(processor.image_processor, CLIPImageProcessor)
+        self.assertIsInstance(processor.image_processor, Kosmos2ImageProcessor)
 
     def test_image_processor(self):
         image_processor = self.get_image_processor()
@@ -123,7 +123,7 @@ class Kosmos2ProcessorTest(unittest.TestCase):
 
         input_str = "This is a test"
 
-        encoded_processor = processor(text=input_str, add_eos_token=True)
+        encoded_processor = processor(text=input_str)
 
         encoded_tok = tokenizer(input_str, return_token_type_ids=False)
 
@@ -187,9 +187,9 @@ class Kosmos2ProcessorTest(unittest.TestCase):
 
     @require_torch
     def test_full_processor(self):
-        url = "https://huggingface.co/microsoft/kosmos-2-patch14-224/resolve/main/two_dogs.jpg"
+        url = "https://huggingface.co/ydshieh/temp-testing-kosmos-2-rename-002/resolve/main/two_dogs.jpg"
 
-        processor = Kosmos2Processor.from_pretrained("microsoft/kosmos-2-patch14-224")
+        processor = Kosmos2Processor.from_pretrained("ydshieh/temp-testing-kosmos-2-rename-002")
 
         # test with different input formats.
         # fmt: off
@@ -228,6 +228,23 @@ class Kosmos2ProcessorTest(unittest.TestCase):
             [(79, 1016)],  # 1 phrase: 1 bbox
             [[(79, 1016), (135, 1008)], (480, 1023)],  # 2 phrase: 2 bboxes + 1 bbox
         ]
+
+        # fmt: off
+        expected_texts = [
+            # no phrase
+            "<grounding> Two puppies sit in a field of grass.",
+            # 1 phrase: without bbox
+            "<grounding><phrase> Two puppies</phrase> sit in a field of grass.",
+            # 1 phrase: with a single bbox
+            "<grounding><phrase> Two puppies</phrase><object><patch_index_0079><patch_index_1016></object> sit in a field of grass.",  # noqa
+            # 1 phrase: with 2 bboxes
+            "<grounding><phrase> Two puppies</phrase><object><patch_index_0079><patch_index_1016></delimiter_of_multi_objects/><patch_index_0135><patch_index_1008></object> sit in a field of grass.",  # noqa
+            # 2 phrases: one with 2 bboxes and another one without bbox
+            "<grounding><phrase> Two puppies</phrase><object><patch_index_0079><patch_index_1016></delimiter_of_multi_objects/><patch_index_0135><patch_index_1008></object> sit in a field of<phrase> grass</phrase> .",  # noqa
+            # 2 phrases: one with 2 bboxes and another one with a single bbox
+            "<grounding><phrase> Two puppies</phrase><object><patch_index_0079><patch_index_1016></delimiter_of_multi_objects/><patch_index_0135><patch_index_1008></object> sit in a field of<phrase> grass</phrase><object><patch_index_0480><patch_index_1023></object> .",  # noqa
+        ]
+        # fmt: on
 
         # fmt: off
         expected_input_ids = [
@@ -279,65 +296,75 @@ class Kosmos2ProcessorTest(unittest.TestCase):
             ]
         )
 
-        def check(texts, bboxes, expected_input_ids):
-            outputs = processor(images=None, text=texts, bboxes=bboxes, add_eos_token=True)
-            self.assertListEqual(outputs.input_ids, expected_input_ids)
+        def check(texts, bboxes, expected_texts, expected_input_ids):
+            processed_texts = processor.preprocess_text(images=None, texts=texts, bboxes=bboxes)
+            assert processed_texts == expected_texts
+
+            outputs = processor(images=None, text=texts, bboxes=bboxes)
+            assert outputs.input_ids == expected_input_ids
 
         # no phrase
-        check(texts[0], bboxes[0][0], expected_input_ids[0])
+        check(texts[0], bboxes[0][0], expected_texts[0], expected_input_ids[0])
 
         # no phrase
-        check(texts[0], bboxes[0][1], expected_input_ids[0])
+        check(texts[0], bboxes[0][1], expected_texts[0], expected_input_ids[0])
 
         # 1 phrase: no bbox
-        check(texts[1], bboxes[1][0], expected_input_ids[1])
+        check(texts[1], bboxes[1][0], expected_texts[1], expected_input_ids[1])
 
         # 1 phrase: no bbox
-        check(texts[1], bboxes[1][1], expected_input_ids[1])
+        check(texts[1], bboxes[1][1], expected_texts[1], expected_input_ids[1])
 
         # 1 phrase: 1 bbox
-        check(texts[1], bboxes[1][2], expected_input_ids[2])
+        check(texts[1], bboxes[1][2], expected_texts[2], expected_input_ids[2])
 
         # 1 phrase: 1 bbox
-        check(texts[1], bboxes[1][3], expected_input_ids[2])
+        check(texts[1], bboxes[1][3], expected_texts[2], expected_input_ids[2])
 
         # 1 phrase: 2 bboxes
-        check(texts[1], bboxes[1][4], expected_input_ids[3])
+        check(texts[1], bboxes[1][4], expected_texts[3], expected_input_ids[3])
 
         # could not contain `[None]`
         with pytest.raises(ValueError):
-            _ = processor.preprocess_examples(images=None, texts=texts[1], bboxes=[[None]])
+            _ = processor.preprocess_text(images=None, texts=texts[1], bboxes=[[None]])
 
         # 2 phrase: 2 bboxes + no bbox
-        check(texts[2], bboxes[2][0], expected_input_ids[4])
+        check(texts[2], bboxes[2][0], expected_texts[4], expected_input_ids[4])
 
         # 2 phrase: 2 bboxes + no bbox
-        check(texts[2], bboxes[2][1], expected_input_ids[4])
+        check(texts[2], bboxes[2][1], expected_texts[4], expected_input_ids[4])
 
         # 2 phrase: 2 bboxes + 1 bbox
-        check(texts[2], bboxes[2][2], expected_input_ids[5])
+        check(texts[2], bboxes[2][2], expected_texts[5], expected_input_ids[5])
 
         # 2 phrase: 2 bboxes + 1 bbox
-        check(texts[2], bboxes[2][3], expected_input_ids[5])
+        check(texts[2], bboxes[2][3], expected_texts[5], expected_input_ids[5])
 
         # 2 phrase: no box (as already specified in the text) + 1 bbox
-        check(texts[3], bboxes[3][0], expected_input_ids[5])
+        check(texts[3], bboxes[3][0], expected_texts[5], expected_input_ids[5])
 
         # could not contain `[None]`
         with pytest.raises(ValueError):
-            _ = processor.preprocess_examples(images=None, texts=texts[2], bboxes=[[(79, 1016), (135, 1008)], [None]])
+            _ = processor.preprocess_text(images=None, texts=texts[2], bboxes=[[(79, 1016), (135, 1008)], [None]])
 
         # test batch
+        outputs = processor.preprocess_text(
+            images=None,
+            texts=batch_text,
+            bboxes=batch_bboxes,
+        )
+        assert outputs == [expected_texts[0], expected_texts[1], expected_texts[2], expected_texts[5]]
         outputs = processor(
             images=None,
             text=batch_text,
             bboxes=batch_bboxes,
-            add_eos_token=True,
         )
-        self.assertListEqual(
-            outputs.input_ids,
-            [expected_input_ids[0], expected_input_ids[1], expected_input_ids[2], expected_input_ids[5]],
-        )
+        assert outputs.input_ids == [
+            expected_input_ids[0],
+            expected_input_ids[1],
+            expected_input_ids[2],
+            expected_input_ids[5],
+        ]
 
         # test batch with padding (without `return_tensors`)
         outputs = processor(
@@ -345,20 +372,17 @@ class Kosmos2ProcessorTest(unittest.TestCase):
             text=batch_text,
             bboxes=batch_bboxes,
             padding=True,
-            add_eos_token=True,
         )
         # padding on the right
-        self.assertListEqual(
-            outputs.input_ids[0],
-            expected_input_ids[0] + [1] * (len(expected_input_ids[5]) - len(expected_input_ids[0])),
+        assert outputs.input_ids[0] == expected_input_ids[0] + [1] * (
+            len(expected_input_ids[5]) - len(expected_input_ids[0])
         )
-        self.assertListEqual(
-            outputs.attention_mask[0],
-            [1] * len(expected_input_ids[0]) + [0] * (len(expected_input_ids[5]) - len(expected_input_ids[0])),
+        assert outputs.attention_mask[0] == [1] * len(expected_input_ids[0]) + [0] * (
+            len(expected_input_ids[5]) - len(expected_input_ids[0])
         )
         # no padding for the longest sequence
-        self.assertListEqual(outputs.input_ids[-1], expected_input_ids[5])
-        self.assertListEqual(outputs.attention_mask[-1], [1] * len(expected_input_ids[5]))
+        assert outputs.input_ids[-1] == expected_input_ids[5]
+        assert outputs.attention_mask[-1] == [1] * len(expected_input_ids[5])
 
         # test batch with padding (with `return_tensors`)
         outputs = processor(
@@ -367,36 +391,37 @@ class Kosmos2ProcessorTest(unittest.TestCase):
             bboxes=batch_bboxes,
             return_tensors="pt",
             padding=True,
-            add_eos_token=True,
         )
         # padding on the right
-        self.assertListEqual(
-            outputs.input_ids.numpy().tolist()[0],
-            expected_input_ids[0] + [1] * (len(expected_input_ids[5]) - len(expected_input_ids[0])),
+        assert outputs.input_ids.numpy().tolist()[0] == expected_input_ids[0] + [1] * (
+            len(expected_input_ids[5]) - len(expected_input_ids[0])
         )
-        self.assertListEqual(
-            outputs.attention_mask.numpy().tolist()[0],
-            [1] * len(expected_input_ids[0]) + [0] * (len(expected_input_ids[5]) - len(expected_input_ids[0])),
+        assert outputs.attention_mask.numpy().tolist()[0] == [1] * len(expected_input_ids[0]) + [0] * (
+            len(expected_input_ids[5]) - len(expected_input_ids[0])
         )
         # no padding for the longest sequence
-        self.assertListEqual(outputs.input_ids.numpy().tolist()[-1], expected_input_ids[5])
-        self.assertListEqual(outputs.attention_mask.numpy().tolist()[-1], [1] * len(expected_input_ids[5]))
+        assert outputs.input_ids.numpy().tolist()[-1] == expected_input_ids[5]
+        assert outputs.attention_mask.numpy().tolist()[-1] == [1] * len(expected_input_ids[5])
 
         # test with image
         num_image_tokens = 64
+        # (`image` type is not checked in `preprocess_text`. It works as long as it is not `None`.)
+        outputs = processor.preprocess_text(
+            images=image, texts=texts[0], bboxes=None, num_image_tokens=num_image_tokens
+        )
+        assert outputs == "".join(["<image>"] + ["<image>"] * num_image_tokens + ["</image>"] + [expected_texts[0]])
 
-        outputs = processor(images=image, text=texts[0], bboxes=None, add_eos_token=True)
-        self.assertTupleEqual(outputs.pixel_values[0].shape, (3, 224, 224))
-        self.assertListEqual(
-            outputs.input_ids,
-            [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[0][1:],
+        outputs = processor(images=image, text=texts[0], bboxes=None)
+        assert outputs.pixel_values[0].shape == (3, 224, 224)
+        assert (
+            outputs.input_ids
+            == [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[0][1:]
         )
-        self.assertListEqual(
-            outputs.image_embeds_position_mask,
-            [0] * 2 + [1] * num_image_tokens + [0] + [0] * (len(expected_input_ids[0]) - 1),
+        assert outputs.image_embeds_position_mask == [0] * 2 + [1] * num_image_tokens + [0] + [0] * (
+            len(expected_input_ids[0]) - 1
         )
-        np.testing.assert_allclose(outputs.pixel_values[0][:3, :3, :3], EXPECTED_PIXEL_VALUES_1, atol=1e-9)
-        np.testing.assert_allclose(outputs.pixel_values[0][:3, -3:, -3:], EXPECTED_PIXEL_VALUES_2, atol=1e-9)
+        assert np.allclose(outputs.pixel_values[0][:3, :3, :3], EXPECTED_PIXEL_VALUES_1, atol=1e-9)
+        assert np.allclose(outputs.pixel_values[0][:3, -3:, -3:], EXPECTED_PIXEL_VALUES_2, atol=1e-9)
 
         # test with image in batch (right padding)
         outputs = processor(
@@ -405,36 +430,32 @@ class Kosmos2ProcessorTest(unittest.TestCase):
             bboxes=batch_bboxes,
             return_tensors="pt",
             padding=True,
-            add_eos_token=True,
         )
-        self.assertTupleEqual(outputs.pixel_values.shape, (4, 3, 224, 224))
-        np.testing.assert_allclose(
+        assert outputs.pixel_values.shape == (4, 3, 224, 224)
+        assert np.allclose(
             outputs.pixel_values[:, :3, :3, :3].numpy(), [EXPECTED_PIXEL_VALUES_1] * len(batch_image), atol=1e-9
         )
-        np.testing.assert_allclose(
+        assert np.allclose(
             outputs.pixel_values[:, :3, -3:, -3:].numpy(), [EXPECTED_PIXEL_VALUES_2] * len(batch_image), atol=1e-9
         )
         # padding on the right: the `[1:]` below is because the part for `BOS` is already added in the beginning of each (dynamically computed) expected value  # noqa
-        # fmt: off
-        EXPECTED_IDS_BATCH_RIGHT_PADDING = [
-            [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[0][1:] + [1] * (len(expected_input_ids[5]) - len(expected_input_ids[0])),
-            [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[5][1:],
-        ]
-        EXPECTED_MASK_BATCH_RIGHT_PADDING = [
-            [1, 1] + [1] * num_image_tokens + [1] + [1] * len(expected_input_ids[0][1:]) + [0] * (len(expected_input_ids[5]) - len(expected_input_ids[0])),
-            [1] * (2 + num_image_tokens + len(expected_input_ids[5])),
-        ]
-        # fmt: on
-        self.assertListEqual(outputs.input_ids.numpy().tolist()[0], EXPECTED_IDS_BATCH_RIGHT_PADDING[0])
-        self.assertListEqual(outputs.attention_mask.numpy().tolist()[0], EXPECTED_MASK_BATCH_RIGHT_PADDING[0])
-        self.assertListEqual(outputs.input_ids.numpy().tolist()[-1], EXPECTED_IDS_BATCH_RIGHT_PADDING[-1])
-        self.assertListEqual(outputs.attention_mask.numpy().tolist()[-1], EXPECTED_MASK_BATCH_RIGHT_PADDING[-1])
-        self.assertListEqual(
-            outputs.image_embeds_position_mask.numpy().tolist(),
-            [[0, 0] + [1] * num_image_tokens + [0] + [0] * (len(expected_input_ids[5]) - 1)] * len(batch_image),
+        assert outputs.input_ids.numpy().tolist()[0] == [0, 64003] + list(range(4, 4 + num_image_tokens)) + [
+            64004
+        ] + expected_input_ids[0][1:] + [1] * (len(expected_input_ids[5]) - len(expected_input_ids[0]))
+        assert outputs.attention_mask.numpy().tolist()[0] == [1, 1] + [1] * num_image_tokens + [1] + [1] * len(
+            expected_input_ids[0][1:]
+        ) + [0] * (len(expected_input_ids[5]) - len(expected_input_ids[0]))
+        assert (
+            outputs.input_ids.numpy().tolist()[-1]
+            == [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[5][1:]
         )
+        assert outputs.attention_mask.numpy().tolist()[-1] == [1] * (2 + num_image_tokens + len(expected_input_ids[5]))
 
-        processor = Kosmos2Processor.from_pretrained("microsoft/kosmos-2-patch14-224", padding_side="left")
+        assert outputs.image_embeds_position_mask.numpy().tolist() == [
+            [0, 0] + [1] * num_image_tokens + [0] + [0] * (len(expected_input_ids[5]) - 1)
+        ] * len(batch_image)
+
+        processor = Kosmos2Processor.from_pretrained("ydshieh/temp-testing-kosmos-2-rename-002", padding_side="left")
 
         # test with image in batch (left padding)
         outputs = processor(
@@ -443,29 +464,29 @@ class Kosmos2ProcessorTest(unittest.TestCase):
             bboxes=batch_bboxes,
             return_tensors="pt",
             padding=True,
-            add_eos_token=True,
         )
         # padding on the left: the `[1:]` below is because the part for `BOS` is already added in the beginning of each (dynamically computed) expected value  # noqa
-        # fmt: off
-        EXPECTED_IDS_BATCH = [
-            [1] * (len(expected_input_ids[5]) - len(expected_input_ids[0])) + [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[0][1:],
-            [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[5][1:],
-        ]
-        EXPECTED_MASK_BATCH =[
-            [0] * (len(expected_input_ids[5]) - len(expected_input_ids[0])) + [1, 1] + [1] * num_image_tokens + [1] + [1] * len(expected_input_ids[0][1:]),
-            [1] * (2 + num_image_tokens + len(expected_input_ids[5])),
-        ]
-        EXPECTED_IMG_POS_MASK_BATCH = [
-            [0] * (len(expected_input_ids[5]) - len(expected_input_ids[0])) + [0, 0] + [1] * num_image_tokens + [0] + [0] * len(expected_input_ids[0][1:]),
-            [0, 0] + [1] * num_image_tokens + [0] + [0] * (len(expected_input_ids[5]) - 1),
-        ]
-        # fmt: on
-
-        self.assertListEqual(outputs.input_ids.numpy().tolist()[0], EXPECTED_IDS_BATCH[0])
-        self.assertListEqual(outputs.attention_mask.numpy().tolist()[0], EXPECTED_MASK_BATCH[0])
-        self.assertListEqual(outputs.image_embeds_position_mask.numpy().tolist()[0], EXPECTED_IMG_POS_MASK_BATCH[0])
+        assert (
+            outputs.input_ids.numpy().tolist()[0]
+            == [1] * (len(expected_input_ids[5]) - len(expected_input_ids[0]))
+            + [0, 64003]
+            + list(range(4, 4 + num_image_tokens))
+            + [64004]
+            + expected_input_ids[0][1:]
+        )
+        assert outputs.attention_mask.numpy().tolist()[0] == [0] * (
+            len(expected_input_ids[5]) - len(expected_input_ids[0])
+        ) + [1, 1] + [1] * num_image_tokens + [1] + [1] * len(expected_input_ids[0][1:])
+        assert outputs.image_embeds_position_mask.numpy().tolist()[0] == [0] * (
+            len(expected_input_ids[5]) - len(expected_input_ids[0])
+        ) + [0, 0] + [1] * num_image_tokens + [0] + [0] * len(expected_input_ids[0][1:])
 
         # no padding for the longest sequence
-        self.assertListEqual(outputs.input_ids.numpy().tolist()[-1], EXPECTED_IDS_BATCH[-1])
-        self.assertListEqual(outputs.attention_mask.numpy().tolist()[-1], EXPECTED_MASK_BATCH[-1])
-        self.assertListEqual(outputs.image_embeds_position_mask.numpy().tolist()[-1], EXPECTED_IMG_POS_MASK_BATCH[-1])
+        assert (
+            outputs.input_ids.numpy().tolist()[-1]
+            == [0, 64003] + list(range(4, 4 + num_image_tokens)) + [64004] + expected_input_ids[5][1:]
+        )
+        assert outputs.attention_mask.numpy().tolist()[-1] == [1] * (2 + num_image_tokens + len(expected_input_ids[5]))
+        assert outputs.image_embeds_position_mask.numpy().tolist()[-1] == [0, 0] + [1] * num_image_tokens + [0] + [
+            0
+        ] * (len(expected_input_ids[5]) - 1)

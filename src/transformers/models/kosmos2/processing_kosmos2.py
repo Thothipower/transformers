@@ -19,12 +19,14 @@ import math
 import re
 from typing import List, Optional, Tuple, Union
 
+import numpy as np
+
 from ...image_processing_utils import BatchFeature
 from ...image_utils import ImageInput, is_batched
 from ...processing_utils import ProcessorMixin
 from ...tokenization_utils import AddedToken
-from ...tokenization_utils_base import BatchEncoding, PaddingStrategy, TextInput, TruncationStrategy
-from ...utils import TensorType
+from ...tokenization_utils_base import PaddingStrategy, TextInput, TruncationStrategy
+from ...utils import TensorType, is_torch_available
 
 
 BboxInput = Union[
@@ -40,21 +42,20 @@ class Kosmos2Processor(ProcessorMixin):
     Constructs an KOSMOS-2 processor which wraps a KOSMOS-2 image processor and a KOSMOS-2 tokenizer into a single
     processor.
 
-    [`Kosmos2Processor`] offers all the functionalities of [`CLIPImageProcessor`] and some functionalities of
+    [`Kosmos2Processor`] offers all the functionalities of [`Kosmos2ImageProcessor`] and some functionalities of
     [`XLMRobertaTokenizerFast`]. See the docstring of [`~Kosmos2Processor.__call__`] and [`~Kosmos2Processor.decode`]
     for more information.
 
     Args:
-        image_processor (`CLIPImageProcessor`):
-            An instance of [`CLIPImageProcessor`]. The image processor is a required input.
+        image_processor (`Kosmos2ImageProcessor`):
+            An instance of [`Kosmos2ImageProcessor`]. The image processor is a required input.
         tokenizer (`XLMRobertaTokenizerFast`):
             An instance of ['XLMRobertaTokenizerFast`]. The tokenizer is a required input.
         num_patch_index_tokens (`int`, *optional*, defaults to 1024):
             The number of tokens that represent patch indices.
     """
-
     attributes = ["image_processor", "tokenizer"]
-    image_processor_class = "CLIPImageProcessor"
+    image_processor_class = "Kosmos2ImageProcessor"
     tokenizer_class = ("XLMRobertaTokenizer", "XLMRobertaTokenizerFast")
 
     def __init__(self, image_processor, tokenizer, num_patch_index_tokens=1024):
@@ -97,7 +98,7 @@ class Kosmos2Processor(ProcessorMixin):
 
         tokens_to_add = []
         for token in self.tag_tokens + patch_index_tokens:
-            tokens_to_add.append(AddedToken(token, lstrip=True, rstrip=False, normalized=False))
+            tokens_to_add.append(AddedToken(token, lstrip=True, rstrip=False))
         tokenizer.add_tokens(tokens_to_add)
 
         super().__init__(image_processor, tokenizer)
@@ -110,7 +111,7 @@ class Kosmos2Processor(ProcessorMixin):
         num_image_tokens: Optional[int] = 64,
         first_image_token_id: Optional[int] = None,
         add_special_tokens: bool = True,
-        add_eos_token: bool = False,
+        add_eos_token: bool = True,
         padding: Union[bool, str, PaddingStrategy] = False,
         truncation: Union[bool, str, TruncationStrategy] = None,
         max_length: Optional[int] = None,
@@ -122,7 +123,7 @@ class Kosmos2Processor(ProcessorMixin):
         **kwargs,
     ) -> BatchFeature:
         """
-        This method uses [`CLIPImageProcessor.__call__`] method to prepare image(s) for the model, and
+        This method uses [`Kosmos2ImageProcessor.__call__`] method to prepare image(s) for the model, and
         [`XLMRobertaTokenizerFast.__call__`] to prepare text for the model.
 
         Please refer to the docstring of the above two methods for more information.
@@ -138,8 +139,8 @@ class Kosmos2Processor(ProcessorMixin):
             first_image_token_id (`int`, *optional*):
                 The token id that will be used for the first place of the subsequence that is reserved to store image
                 information. If unset, will default to `self.tokenizer.unk_token_id + 1`.
-            add_eos_token (`bool`, defaults to `False`):
-                Whether or not to include `EOS` token id in the encoding when `add_special_tokens=True`.
+            add_eos_token (`bool`, defaults to `True`):
+                If to include `EOS` token id in the encoding when `add_special_tokens=True`.
         """
         if images is None and text is None:
             raise ValueError("You have to specify either images or text.")
@@ -151,7 +152,7 @@ class Kosmos2Processor(ProcessorMixin):
             encoding.update(image_encoding)
 
         if text is not None:
-            text = self.preprocess_examples(text, images, bboxes, num_image_tokens=num_image_tokens)
+            text = self.preprocess_text(text, images, bboxes, num_image_tokens=num_image_tokens)
 
             if add_special_tokens and not add_eos_token:
                 if isinstance(text, str):
@@ -212,9 +213,7 @@ class Kosmos2Processor(ProcessorMixin):
                 image_embeds_position_mask.append(mask)
 
             if isinstance(text, list):
-                sorted_length = sorted(
-                    [(idx, len(x)) for idx, x in enumerate(text_encoding.input_ids)], key=lambda x: x[-1]
-                )
+                sorted_length = sorted([(idx, len(x)) for idx, x in enumerate(text_encoding.input_ids)])
                 _, min_len_not_padded = sorted_length[0]
                 idx, _ = sorted_length[-1]
 
@@ -237,17 +236,19 @@ class Kosmos2Processor(ProcessorMixin):
                         image_embeds_position_mask = [
                             x + [0] * (max_len_padded - len(x)) for x in image_embeds_position_mask
                         ]
-                        encoding["attention_mask"] = [
-                            x + [0] * (max_len_padded - len(x)) for x in encoding["attention_mask"]
-                        ]
+                        if "attention_mask" in encoding:
+                            encoding["attention_mask"] = [
+                                x + [0] * (max_len_padded - len(x)) for x in encoding["attention_mask"]
+                            ]
                     elif self.tokenizer.padding_side == "left":
                         input_ids = [[self.tokenizer.pad_token_id] * (max_len_padded - len(x)) + x for x in input_ids]
                         image_embeds_position_mask = [
                             [0] * (max_len_padded - len(x)) + x for x in image_embeds_position_mask
                         ]
-                        encoding["attention_mask"] = [
-                            [0] * (max_len_padded - len(x)) + x for x in encoding["attention_mask"]
-                        ]
+                        if "attention_mask" in encoding:
+                            encoding["attention_mask"] = [
+                                [0] * (max_len_padded - len(x)) + x for x in encoding["attention_mask"]
+                            ]
 
             # un-batch if necessary
             if isinstance(text, str) and return_tensors is None:
@@ -255,66 +256,24 @@ class Kosmos2Processor(ProcessorMixin):
                 encoding["attention_mask"] = encoding["attention_mask"][0]
                 image_embeds_position_mask = image_embeds_position_mask[0]
 
-            # update (with the target tensor type if specified)
-            encoding.update(
-                BatchEncoding(
-                    data={
-                        "input_ids": input_ids,
-                        "attention_mask": encoding["attention_mask"],
-                        "image_embeds_position_mask": image_embeds_position_mask,
-                    },
-                    tensor_type=return_tensors,
-                )
-            )
+            # to the target tensor type
+            if return_tensors == "pt":
+                if not is_torch_available():
+                    raise RuntimeError("return_tensors set to 'pt' but PyTorch can't be imported")
+                import torch
+
+                input_ids = torch.from_numpy(np.array(input_ids))
+                image_embeds_position_mask = torch.from_numpy(np.array(image_embeds_position_mask))
+                encoding["attention_mask"] = torch.from_numpy(np.array(encoding["attention_mask"]))
+            elif return_tensors is not None:
+                raise ValueError("return_tensors should be one of 'None' or 'pt'")
+
+            encoding["input_ids"] = input_ids
+            encoding["image_embeds_position_mask"] = image_embeds_position_mask
 
         return encoding
 
-    def _check_bboxes_for_single_text(self, bboxes):
-        """
-        Check `bboxes` for a single text example. It could be
-            - `None`: no bounding box associated to a text.
-            - A list with each element being the bounding boxes associated to one `<phrase> ... </phrase>` pair found
-              in a text. This could be:
-                  - `None`: no bounding box associated to a `<phrase> ... </phrase>` pair.
-                  - A tuple of 2 integers: A single bounding box specified by patch indices.
-                  - A tuple of 4 float point number: A single bounding box specified by (normalized) coordinates.
-                  - A list containing the above 2 tuple types: Multiple bounding boxes for a
-                   `<phrase> ... </phrase>` pair.
-        """
-        if bboxes is None:
-            return
-        elif not isinstance(bboxes, list):
-            raise ValueError("`bboxes` (for a single text example) should be `None` or a list.")
-
-        # `bbox` is the bounding boxes for a single <phrase> </phrase> pair
-        for bbox in bboxes:
-            if bbox is None:
-                continue
-            elif not isinstance(bbox, list):
-                bbox = [bbox]
-            for element in bbox:
-                if not isinstance(element, tuple) or not (
-                    (len(element) == 2 and all(isinstance(x, int) for x in element))
-                    or (len(element) == 4 and all(isinstance(x, float) for x in element))
-                ):
-                    raise ValueError(
-                        "Each element in `bboxes` (for a single text example) should be either `None`, a tuple containing "
-                        "2 integers or 4 float point numbers, or a list containing such tuples. Also "
-                        "make sure the arguments `texts` and `bboxes` passed to `preprocess_text` are both in "
-                        "batches or both for a single example."
-                    )
-
-    def _preprocess_single_example(self, text, image, bboxes, img_info_tokens):
-        text = text.strip()
-        if image is not None:
-            # Add `<image> ... (fake) image tokens ... </image>`
-            text = f"{img_info_tokens} {text}"
-
-        # Add `<object> <patch_idx_xxxx> <patch_idx_yyy> </object>` after `<phrase> phrase text </phrase>`
-        text = self._insert_patch_index_tokens(text, bboxes)
-        return text
-
-    def preprocess_examples(
+    def preprocess_text(
         self,
         texts: Union[TextInput, List[TextInput]],
         images: ImageInput = None,
@@ -336,8 +295,54 @@ class Kosmos2Processor(ProcessorMixin):
             `Union[TextInput, List[TextInput]]`: The processed texts with image and patch index tokens.
         """
         # These are fake `<image>` tokens enclosed between (the actual) `<image>` token and `</image>`.
-        img_tokens = [self.boi_token] * num_image_tokens
-        img_info_tokens = " ".join([self.boi_token] + img_tokens + [self.eoi_token])
+        img_tokens = ["<image>"] * num_image_tokens
+        img_info = " ".join(["<image>"] + img_tokens + ["</image>"])
+
+        def check_bboxes_for_single_text(bboxes):
+            """
+            Check `bboxes` for a single text example. It could be
+                - `None`: no bounding box associated to a text.
+                - A list with each element being the bounding boxes associated to one `<phrase> ... </phrase>` pair
+                  found in a text. This could be:
+                      - `None`: no bounding box associated to a `<phrase> ... </phrase>` pair.
+                      - A tuple of 2 integers: A single bounding box specified by patch indices.
+                      - A tuple of 4 float point number: A single bounding box specified by (normalized) coordinates.
+                      - A list containing the above 2 tuple types: Multiple bounding boxes for a
+                       `<phrase> ... </phrase>` pair.
+            """
+            if bboxes is None:
+                return
+            elif not isinstance(bboxes, list):
+                raise ValueError("`bboxes` (for a single text example) should be `None` or a list.")
+
+            # `bbox` is the bounding boxes for a single <phrase> </phrase> pair
+            for bbox in bboxes:
+                if bbox is None:
+                    continue
+                elif not isinstance(bbox, list):
+                    bbox = [bbox]
+                for elt in bbox:
+                    if not isinstance(elt, tuple) or not (
+                        (len(elt) == 2 and all(isinstance(x, int) for x in elt))
+                        or (len(elt) == 4 and all(isinstance(x, float) for x in elt))
+                    ):
+                        raise ValueError(
+                            "Each element in `bboxes` (for a single text example) should be `None`, a tuple containing "
+                            "2 integers or 4 float point numbers, or a list containing such tuples. Also "
+                            "make sure the arguments `texts` and `bboxes` passed to `preprocess_text` are both in "
+                            "batches or both for a single example."
+                        )
+
+        def preprocess_single(text, image, bboxes):
+            text = text.strip()
+            if image is not None:
+                # Add `<image> ... (fake) image tokens ... </image>`
+                text = f"{img_info} {text}"
+
+            # Add `<object> <patch_idx_xxxx> <patch_idx_yyy> </object>` after `<phrase> phrase text </phrase>`
+            text = self._insert_patch_index_tokens(text, bboxes)
+            text = self._add_remove_spaces_around_tag_tokens(text)
+            return text
 
         # make batch to simplify processing logic
         batched = True
@@ -355,13 +360,13 @@ class Kosmos2Processor(ProcessorMixin):
             )
 
         if not batched:
-            self._check_bboxes_for_single_text(bboxes)
+            check_bboxes_for_single_text(bboxes)
             bboxes = [bboxes]
         elif bboxes is not None:
             if not isinstance(bboxes, list):
                 raise ValueError("`bboxes` should be `None` or a list (as a batch) when `texts` is passed as a batch.")
             for x in bboxes:
-                self._check_bboxes_for_single_text(x)
+                check_bboxes_for_single_text(x)
         else:
             bboxes = [None] * len(texts)
 
@@ -370,10 +375,7 @@ class Kosmos2Processor(ProcessorMixin):
                 f"The number of examples in `texts` and `bboxes` should be the same. Got {len(texts)} v.s. {len(bboxes)} instead."
             )
 
-        result = [
-            self._preprocess_single_example(text, image, bbox, img_info_tokens)
-            for text, image, bbox in zip(texts, images, bboxes)
-        ]
+        result = [preprocess_single(text, image, bbox) for text, image, bbox in zip(texts, images, bboxes)]
         # un-batch if necessary
         if not batched:
             result = result[0]
@@ -391,13 +393,13 @@ class Kosmos2Processor(ProcessorMixin):
     # Copied from transformers.models.blip.processing_blip.BlipProcessor.decode with BertTokenizerFast->PreTrainedTokenizer
     def decode(self, *args, **kwargs):
         """
-        This method forwards all its arguments to PreTrainedTokenizer's [`~PreTrainedTokenizer.decode`]. Please refer to
-        the docstring of this method for more information.
+        This method forwards all its arguments to PreTrainedTokenizer's [`~PreTrainedTokenizer.decode`]. Please refer
+        to the docstring of this method for more information.
         """
         return self.tokenizer.decode(*args, **kwargs)
 
     def post_process_generation(self, text, cleanup_and_extract=True):
-        caption = text.split(self.eoi_token)[-1]
+        caption = text.split("</image>")[-1]
         if cleanup_and_extract:
             return clean_text_and_extract_entities_with_bboxes(caption)
         return caption
@@ -435,10 +437,7 @@ class Kosmos2Processor(ProcessorMixin):
                 bbox = [bbox]
             patch_index_strings = []
             # A phrase could have multiple bboxes
-            if not all(box is not None for box in bbox):
-                raise ValueError(
-                    "The multiple bounding boxes for a single phrase should not contain any `None` value."
-                )
+            assert all(box is not None for box in bbox)
             for box in bbox:
                 patch_index_1, patch_index_2 = self._convert_bbox_to_patch_index_tokens(box)
                 patch_index_strings.append(f"{patch_index_1} {patch_index_2}")
@@ -470,6 +469,38 @@ class Kosmos2Processor(ProcessorMixin):
         token_2 = f"<patch_index_{str(idx_2).zfill(4)}>"
 
         return token_1, token_2
+
+    def _add_remove_spaces_around_tag_tokens(self, text):
+        """
+        Remove spaces before tag tokens (e.g. `<x>`). Also ensure a space after a tag token, if it is not followed by
+        another tag token (this is not technically necessary, but good for a standard/consistent format). This avoids
+        the inconsistency of tokenization results between kosmos-2 slow and fast tokenizers.
+        """
+
+        tag_tokens = set(
+            self.tag_tokens + [f"<patch_index_{str(x).zfill(4)}>" for x in range(self.num_patch_index_tokens)]
+        )
+        pattern = "|".join(tag_tokens)
+        splits = re.split(rf"({pattern})", text)
+        # Don't keep the leading and trailing space if any
+        splits = [split for idx, split in enumerate(splits) if not (idx in [0, len(splits) - 1] and split == "")]
+
+        output = ""
+        prev_str_in_targets = False
+        for split in splits:
+            if split in tag_tokens:
+                prev_str_in_targets = True
+                output = output.rstrip() + split
+            else:
+                # we don't need to ensure a space before a normal token that is after a tag token. But having it and
+                # keeps a standard format is good anyway.
+                if prev_str_in_targets and not split.startswith(" "):
+                    output += " " + split
+                else:
+                    output += split
+                prev_str_in_targets = False
+
+        return output
 
 
 def coordinate_to_patch_index(bbox: Tuple[float, float, float, float], num_patches_per_side: int) -> Tuple[int, int]:
@@ -606,33 +637,16 @@ def extract_entities_with_patch_indices(text):
     return entities_with_patch_indices
 
 
+def remove_special_fields(text):
+    return re.sub("<.*?>", "", text)
+
+
 def adjust_entity_positions(entity, text):
-    """Adjust the positions of the entities in `text` to be relative to the text with special fields removed."""
     entity_name, (start, end) = entity
-    # computed the length of strings with special fields (tag tokens, patch index tokens, etc.) removed
-    adjusted_start = len(re.sub("<.*?>", "", text[:start]))
-    adjusted_end = len(re.sub("<.*?>", "", text[:end]))
+    adjusted_start = len(remove_special_fields(text[:start]))
+    adjusted_end = len(remove_special_fields(text[:end]))
     adjusted_entity = (entity_name, (adjusted_start, adjusted_end))
     return adjusted_entity
-
-
-def _cleanup_spaces(text, entities):
-    """Remove the spaces around the text and the entities in it."""
-    new_text = text.strip()
-    leading_spaces = len(text) - len(text.lstrip())
-
-    new_entities = []
-    for entity_name, (start, end), bboxes in entities:
-        entity_name_leading_spaces = len(entity_name) - len(entity_name.lstrip())
-        entity_name_trailing_spaces = len(entity_name) - len(entity_name.rstrip())
-
-        start = start - leading_spaces + entity_name_leading_spaces
-        end = end - leading_spaces - entity_name_trailing_spaces
-        entity_name = entity_name.strip()
-
-        new_entities.append((entity_name, (start, end), bboxes))
-
-    return new_text, new_entities
 
 
 # copied from https://github.com/microsoft/unilm/blob/97e4923e97d3ee10b57e97013556e3fd0d207a9b/kosmos-2/demo/decode_string.py#L77-L87
@@ -651,8 +665,7 @@ def clean_text_and_extract_entities_with_bboxes(text, num_patches_per_side=32):
     >>> entities
     [('a snowman', (12, 21), [(0.390625, 0.046875, 0.984375, 0.828125)]), ('a fire', (41, 47), [(0.171875, 0.015625, 0.484375, 0.890625)])]
     ```"""
-    # remove special fields (tag tokens, patch index tokens, etc.)
-    processed_text = re.sub("<.*?>", "", text)
+    processed_text = remove_special_fields(text)
 
     entities_with_patch_indices = extract_entities_with_patch_indices(text)
     entities = []
@@ -663,4 +676,21 @@ def clean_text_and_extract_entities_with_bboxes(text, num_patches_per_side=32):
 
         entities.append(adjusted_entity + (bboxes_in_coords,))
 
-    return _cleanup_spaces(processed_text, entities)
+    def cleanup_spaces(text, entities):
+        new_text = text.strip()
+        leading_spaces = len(text) - len(text.lstrip())
+
+        new_entities = []
+        for entity_name, (start, end), bboxes in entities:
+            entity_name_leading_spaces = len(entity_name) - len(entity_name.lstrip())
+            entity_name_trailing_spaces = len(entity_name) - len(entity_name.rstrip())
+
+            start = start - leading_spaces + entity_name_leading_spaces
+            end = end - leading_spaces - entity_name_trailing_spaces
+            entity_name = entity_name.strip()
+
+            new_entities.append((entity_name, (start, end), bboxes))
+
+        return new_text, new_entities
+
+    return cleanup_spaces(processed_text, entities)
